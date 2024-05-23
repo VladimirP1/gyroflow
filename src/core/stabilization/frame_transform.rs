@@ -54,6 +54,74 @@ impl FrameTransform {
         fov
     }
 
+    pub fn get_lens_data_at_timestamp2(params: &ComputeParams, timestamp_ms: f64, frame : usize) -> (Matrix3<f64>, [f64; 12], f64, f64, f64, Option<f64>) {
+        let mut interpolated_lens = None;
+        let gyro = params.gyro.read();
+        // if !gyro.file_metadata.lens_positions.is_empty() {
+        //     use crate::util::MapClosest;
+        //     if let Some(val) = gyro.file_metadata.lens_positions.get_closest(&((timestamp_ms * 1000.0).round() as i64), 100000) { // closest within 100ms
+        //         interpolated_lens = Some(params.lens.get_interpolated_lens_at(*val));
+        //     }
+        // }
+        if frame < gyro.file_metadata.sony_distortion.len() {
+            interpolated_lens = Some(params.lens.get_sony_lens(params, &gyro.file_metadata.sony_distortion[frame]));
+        }
+        let mut lens = interpolated_lens.as_ref().unwrap_or(&params.lens);
+
+        let lrc = params.keyframes.value_at_video_timestamp(&KeyframeType::LightRefractionCoeff, timestamp_ms).unwrap_or(params.light_refraction_coefficient);
+        if lrc != 1.0 {
+            interpolated_lens = Some(lens.for_light_refraction(lrc, 0.05));
+            lens = interpolated_lens.as_ref().unwrap_or(&params.lens);
+        }
+
+        let mut focal_length = lens.focal_length;
+
+        let mut camera_matrix = lens.get_camera_matrix((params.width, params.height), (params.video_width, params.video_height));
+        let distortion_coeffs = lens.get_distortion_coeffs();
+
+        let mut stretch_lens = true;
+
+        if !gyro.file_metadata.lens_params.is_empty() && lens.fisheye_params.distortion_coeffs.len() < 4 {
+            use crate::util::MapClosest;
+            if let Some(val) = gyro.file_metadata.lens_params.get_closest(&((timestamp_ms * 1000.0).round() as i64), 100000) { // closest within 100ms
+                let pixel_focal_length = val.pixel_focal_length.map(|x| x as f64).or_else(|| {
+                    focal_length = Some(val.focal_length? as f64);
+                    Some((val.focal_length? as f64 / ((val.pixel_pitch?.1 as f64 / 1000000.0) * val.capture_area_size?.1 as f64)) * params.video_height as f64 / params.plane_scale.1)
+                });
+                if let Some(pfl) = pixel_focal_length {
+                    // println!("pfl: {pfl:.3}px, lens: {:?}", val);
+                    camera_matrix[(0, 0)] = pfl * params.plane_scale.0;
+                    camera_matrix[(1, 1)] = pfl * params.plane_scale.1;
+                    camera_matrix[(0, 2)] = params.video_width as f64 / 2.0;
+                    camera_matrix[(1, 2)] = params.video_height as f64 / 2.0;
+                    stretch_lens = false;
+                }
+            }
+        }
+        drop(gyro);
+
+        let radial_distortion_limit = lens.fisheye_params.radial_distortion_limit.unwrap_or_default();
+
+        let (calib_width, calib_height) = if lens.calib_dimension.w > 0 && lens.calib_dimension.h > 0 {
+            (lens.calib_dimension.w as f64, lens.calib_dimension.h as f64)
+        } else {
+            (params.video_width.max(1) as f64, params.video_height.max(1) as f64)
+        };
+
+        let input_horizontal_stretch = if lens.input_horizontal_stretch > 0.01 { lens.input_horizontal_stretch } else { 1.0 };
+        let input_vertical_stretch = if lens.input_vertical_stretch > 0.01 { lens.input_vertical_stretch } else { 1.0 };
+
+        if stretch_lens {
+            let lens_ratiox = (params.video_width as f64 / calib_width) * input_horizontal_stretch;
+            let lens_ratioy = (params.video_height as f64 / calib_height) * input_vertical_stretch;
+            camera_matrix[(0, 0)] *= lens_ratiox;
+            camera_matrix[(1, 1)] *= lens_ratioy;
+            camera_matrix[(0, 2)] *= lens_ratiox;
+            camera_matrix[(1, 2)] *= lens_ratioy;
+        }
+        (camera_matrix, distortion_coeffs, radial_distortion_limit, input_horizontal_stretch, input_vertical_stretch, focal_length)
+    }
+
     pub fn get_lens_data_at_timestamp(params: &ComputeParams, timestamp_ms: f64) -> (Matrix3<f64>, [f64; 12], f64, f64, f64, Option<f64>) {
         let mut interpolated_lens = None;
         let gyro = params.gyro.read();
@@ -144,7 +212,7 @@ impl FrameTransform {
             radial_distortion_limit,
             input_horizontal_stretch,
             input_vertical_stretch,
-            focal_length) = Self::get_lens_data_at_timestamp(params, timestamp_ms);
+            focal_length) = Self::get_lens_data_at_timestamp2(params, timestamp_ms, frame);
         // ----------- Lens -----------
 
         let img_dim_ratio = Self::get_ratio(params);

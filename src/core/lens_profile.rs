@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use std::collections::{ HashSet, BTreeMap };
+use std::{collections::{ BTreeMap, HashSet }, str::FromStr};
 use itertools::Itertools;
 
 use serde::{ Serialize, Deserialize };
@@ -459,6 +459,120 @@ impl LensProfile {
         let zoom = super::zooming::from_compute_params(params);
         zoom.compute(&[0.0], &crate::keyframes::KeyframeManager::new()).first().map(|x| x.0).unwrap_or(1.0)*/
         1.0
+    }
+
+    pub fn get_sony_lens(&self, params: &crate::stabilization::ComputeParams, poly : & Vec<f64>) -> LensProfile {
+        let sol = nalgebra::DVector::from_vec(poly.clone());
+
+        fn a2y(a: f64, params: &nalgebra::DVector<f64>) -> f64 {
+            let mut sum = 0.0;
+            for i in 0..6 {
+                sum += a.powi(i + 1) * params[i as usize];
+            }
+            sum
+        }
+
+        fn a2y_diff(a: f64, params: &nalgebra::DVector<f64>) -> f64 {
+            let mut sum = 0.0;
+            for i in 0..6 {
+                sum += (i as f64 + 1.0) * a.powi(i) * params[i as usize];
+            }
+            sum
+        }
+        
+        fn y2a(y: f64, params: &nalgebra::DVector<f64>) -> f64 {
+            let mut x = 0.01;
+
+            for _ in 0..50 {
+                x = x - (a2y(x, params) - y) / a2y_diff(x, params);
+            }
+            x
+        }
+
+        /* calculate max possible fov */
+        let sensor_crop_px = nalgebra::Vector2::new(4240.0, 2384.0);
+        let pixel_pitch = nalgebra::Vector2::new(8400.0, 8400.0) / 1e9;
+        let video_res_px = nalgebra::Vector2::new(3840.0, 2160.0);
+
+        println!("{:?}", video_res_px);
+        
+        let sensor_crop = pixel_pitch.component_mul(&sensor_crop_px);
+        let pixel_pitch_scaled = sensor_crop.component_div(&video_res_px);
+
+        let fov_hor = y2a(sensor_crop.x / 2.0, &sol);
+        let fov_vert = y2a(sensor_crop.y / 2.0, &sol);
+        let fov_diag = y2a(sensor_crop.norm() / 2.0, &sol);
+
+        let focal_length = (video_res_px.x / fov_hor.tan())
+            .max(video_res_px.y / fov_vert.tan())
+            .max(video_res_px.norm() / fov_diag.tan())
+            / 2.0;
+        let post_scale = (
+            1.0 / pixel_pitch_scaled.x / focal_length,
+            1.0 / pixel_pitch_scaled.y / focal_length,
+        );
+        LensProfile {
+            name: String::new(),
+            note: String::new(),
+            calibrated_by: String::new(),
+            camera_brand: String::new(),
+            camera_model: String::new(),
+            lens_model: String::new(),
+            camera_setting:String::new(),
+
+           calib_dimension:Dimensions{w: 3840, h: 2160},
+           orig_dimension:Dimensions{w: 3840, h: 2160},
+           output_dimension:Some(Dimensions{w: 3840, h: 2160}),
+           
+           frame_readout_time:Some(8.85),
+           gyro_lpf: None,
+
+
+           input_horizontal_stretch: 1.0,
+           input_vertical_stretch: 1.0,
+           num_images: 10,
+
+           fps: 59.94,
+
+           crop: None,
+
+           official: true,
+
+           asymmetrical: false,
+
+           fisheye_params: CameraParams{
+                    RMS_error: 0.0, 
+                    camera_matrix: vec![[focal_length, 0.0, 1920.0], [0.0, focal_length, 1080.0], [0.0,0.0,1.0]], 
+                    distortion_coeffs: vec![sol[0], sol[1], sol[2], sol[3], sol[4], sol[5], post_scale.0, post_scale.1], 
+                    radial_distortion_limit:None
+            },
+
+           identifier: String::new(),
+           
+           calibrator_version: String::new(),
+           date: String::new(),
+
+           compatible_settings: Vec::new(),
+
+           sync_settings: None,
+
+           distortion_model: Some(String::from_str("opencv_fisheye").unwrap()),
+           digital_lens: None,
+           digital_lens_params: None,
+
+           interpolations: None,
+
+           focal_length: None,
+           crop_factor: None,
+           global_shutter: false,
+
+           path_to_file: String::new(),
+           optimal_fov: None,
+           is_copy: false,
+           rating: None,
+           checksum: None,
+            parsed_interpolations: BTreeMap::new()
+        }
     }
 
     pub fn get_interpolated_lens_at(&self, val: f64) -> LensProfile {

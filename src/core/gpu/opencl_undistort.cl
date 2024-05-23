@@ -216,6 +216,25 @@ DATA_TYPEF sample_input_at(float2 uv, __global const uchar *srcptr, __global Ker
     return min(sum, (DATA_TYPEF)(params->pixel_value_limit));
 }
 
+float2 distort_point2(float x, float y, float z, __global KernelParams *params) {
+    float p[6]= { params->k[0], params->k[1], params->k[2], params->k[3], params->k[4], params->k[5] };
+    float2 post_scale = { params->k[6], params->k[7] };
+
+    float2 pos = (float2)(x, y) / z;
+    float r = length(pos);
+    float theta = atan(r);
+
+    float theta2 = theta*theta,
+          theta3 = theta2*theta,
+          theta4 = theta2*theta2,
+          theta5 = theta2*theta3,
+          theta6 = theta3*theta3;
+
+    float theta_d =  theta * p[0] + theta2 * p[1] + theta3 * p[2] + theta4 * p[3] + theta5 * p[4] + theta6 * p[5];
+    float scale = r == 0.0f? 1.0f : theta_d / r;
+    return pos * scale * post_scale;
+}
+
 float2 rotate_and_distort(float2 pos, uint idx, __global KernelParams *params, __global const float *matrices) {
     __global const float *matrix = &matrices[idx];
     float _x = (pos.x * matrix[0]) + (pos.y * matrix[1]) + matrix[2] + params->translation3d.x;
@@ -225,7 +244,7 @@ float2 rotate_and_distort(float2 pos, uint idx, __global KernelParams *params, _
         if (params->r_limit > 0.0f && length((float2)(_x, _y) / _w) > params->r_limit) {
             return (float2)(-99999.0f, -99999.0f);
         }
-        float2 uv = params->f * distort_point(_x, _y, _w, params) + params->c;
+        float2 uv = params->f * distort_point2(_x, _y, _w, params) + params->c;
 
         if (params->flags & 2) { // Has digital lens
             uv = digital_distort_point(uv, params);

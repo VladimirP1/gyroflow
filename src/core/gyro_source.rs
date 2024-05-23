@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
+use itertools::Itertools;
 use nalgebra::*;
 use std::iter::zip;
 use std::collections::BTreeMap;
@@ -50,6 +51,7 @@ pub struct FileMetadata {
     pub has_accurate_timestamps: bool,
     pub additional_data:     serde_json::Value,
     pub per_frame_time_offsets: Vec<f64>,
+    pub sony_distortion : Vec<Vec<f64>>,
     pub per_frame_data:      Vec<serde_json::Value>,
 }
 impl FileMetadata {
@@ -70,6 +72,7 @@ impl FileMetadata {
             has_accurate_timestamps: self.has_accurate_timestamps.clone(),
             additional_data:         self.additional_data.clone(),
             per_frame_time_offsets:  Default::default(),
+            sony_distortion : Default::default(),
             per_frame_data:          Default::default(),
         }
     }
@@ -175,6 +178,7 @@ impl GyroSource {
         let mut lens_positions = BTreeMap::new();
         let mut lens_params = BTreeMap::new();
         let mut additional_data = serde_json::Value::Object(serde_json::Map::new());
+        let mut sony_distortion = Vec::<Vec<f64>>::new();
 
         if input.camera_type() == "BlackBox" {
             if let Some(ref mut samples) = input.samples {
@@ -243,6 +247,29 @@ impl GyroSource {
 
                                 lens_info.pixel_focal_length = Some(((focal_length_nm as f64 / effective_sensor_height_nm as f64) * size.1 as f64) as f32);
                             }
+                        }
+                    }
+                    if let Some(md) = tag_map.get(&GroupId::Custom("LensDistortion".into())) {
+                        if let Some(v) = md.get_t(TagId::Data) as Option<&serde_json::Value> {
+                            let sensor_height = v.get("effective_sensor_height_nm").and_then(|x| x.as_f64()).unwrap_or(1.0) / 1e9;
+                            let coeff_scale = v.get("coeff_scale").and_then(|x| x.as_f64()).unwrap_or(1.0);
+                            let lens_in_ray_angle = DVector::from_iterator(10, v.get("coeffs").unwrap().as_array().unwrap().iter().map(|x| x.as_f64().unwrap())).insert_row(0, 0.0) / coeff_scale / 180.0 * std::f64::consts::PI;
+
+                            let lens_out_radius =
+                                DVector::from_iterator(11, (0..11).map(|i| (i as f64) / 10.0 * sensor_height));
+
+                            /* fit polynomial */
+                            let mut matrix = DMatrix::<f64>::zeros(11, 6);
+                            for (i, angle) in lens_in_ray_angle.iter().enumerate() {
+                                for power in 0..6 {
+                                    matrix[(i, power)] = angle.powf((power + 1) as f64);
+                                }
+                            }
+                            let sol = nalgebra::SVD::new(matrix, true, true)
+                                .solve(&lens_out_radius, 1e-18f64)
+                                .unwrap();
+                            
+                            sony_distortion.push(sol.iter().map(|x|x.to_owned()).collect_vec());
                         }
                     }
                     if lens_info.pixel_pitch.is_some() && lens_info.capture_area_size.is_some() && (lens_info.pixel_focal_length.is_some() || lens_info.focal_length.is_some()) {
@@ -358,6 +385,7 @@ impl GyroSource {
             has_accurate_timestamps,
             additional_data,
             per_frame_time_offsets: Default::default(),
+            sony_distortion,
             per_frame_data: Default::default(),
         };
 
